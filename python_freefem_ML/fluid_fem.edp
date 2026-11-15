@@ -1,0 +1,140 @@
+load "gmsh";
+load "iovtk";
+
+// ============================================================
+// 1. 网格
+// ============================================================
+mesh Th = gmshload("rectangle_10x1.msh");
+cout << "mesh nv = " << Th.nv << endl;
+
+// ============================================================
+// 2. 函数空间
+//    Vh2: P2 (速度，二次元，高精度)
+//    Wh:  P1 (压力，一次元)
+//   Taylor-Hood P2-P1 满足 LBB 条件
+// ============================================================
+fespace Vh2(Th, P2);
+Vh2 ux, uy, vx, vy;    // 未知速度 + 测试函数
+
+fespace Wh(Th, P1);
+Wh p, q;               // 未知压力 + 测试函数
+
+// ============================================================
+// 3. 物理参数
+// ============================================================
+real nu = 0.01;        // 运动粘度 ν = μ/ρ
+real rho = 1.0;        // 密度
+real g = 0.0;          // 重力 水平管设 0
+
+func real uin(real yy) {
+    return 6.0 * yy * (1.0 - yy);  // Umax = 1.5 at y=0.5
+}
+
+// ============================================================
+// 4. steably N-S 求解（Picard 线性化
+//use un, vn as bofore ux,and uy
+// ============================================================
+Vh2 un, vn;
+
+// ---- use stoke value as first value ----
+
+solve stokesinit([ux, uy, p], [vx, vy, q]) =
+       int2d(Th)(
+        nu * (
+            dx(ux)*dx(vx) + dy(ux)*dy(vx)
+          + dx(uy)*dx(vy) + dy(uy)*dy(vy)
+        )
+    )
+    // 
+    - int2d(Th)(p * (dx(vx) + dy(vy)))
+    // 
+    - int2d(Th)(q * (dx(ux) + dy(uy)))
+    // 
+    + on(1, ux=uin(y), uy=0)     // 入口：抛物线
+    + on(2, p=0)                  //
+    + on(3, ux=0, uy=0)           // 底壁
+    + on(4, ux=0, uy=0)           // 顶壁
+    ;
+
+un = ux; vn = uy;
+cout << "Stokes init done." << endl;
+
+// ---- Picard 迭代 ----
+int maxiter = 20;
+for (int iter = 0; iter < maxiter; iter++) {
+
+    solve ns([ux, uy, p], [vx, vy, q]) =
+
+        // ============================================================
+        // ============================================================
+        int2d(Th)(
+            rho * (
+                (un * dx(ux) + vn * dy(ux)) * vx
+              + (un * dx(uy) + vn * dy(uy)) * vy
+            )
+        )
+
+        // ============================================================
+        // ============================================================
+        + int2d(Th)(
+            nu * (
+                dx(ux)*dx(vx) + dy(ux)*dy(vx)
+              + dx(uy)*dx(vy) + dy(uy)*dy(vy)
+            )
+        )
+
+        // ============================================================
+        
+        // ============================================================
+        - int2d(Th)(p * (dx(vx) + dy(vy)))
+
+        // ============================================================
+        // ============================================================
+        - int2d(Th)(q * (dx(ux) + dy(uy)))
+
+        // ============================================================
+        
+        // ============================================================
+        + int2d(Th)(- rho * g * vy)
+
+        // ============================================================
+        // 边界条件
+        // ============================================================
+        + on(1, ux=uin(y), uy=0)     // 入口
+        + on(2, p=0)                  //
+        + on(3, ux=0, uy=0)           // 
+        + on(4, ux=0, uy=0)           //
+        ;
+
+    real du = sqrt(int2d(Th)((ux-un)^2 + (uy-vn)^2));
+    cout << "iter " << iter << " |du|=" << du << endl;
+
+    un = ux; vn = uy;
+    if (du < 1e-6) {
+        cout << "converged!" << endl;
+        break;
+    }
+}
+
+// ============================================================
+// ============================================================
+cout << "----- results -----" << endl;
+cout << "ux min=" << ux[].min << " max=" << ux[].max << endl;
+cout << "uy min=" << uy[].min << " max=" << uy[].min << endl;
+cout << "p min=" << p[].min << " max=" << p[].max << endl;
+
+Vh2 divu = dx(ux) + dy(uy);
+cout << "max |div(u)| = " << divu[].max << endl;
+
+Vh2 dudyatwall;
+dudyatwall = dy(ux);
+cout << "wall shear (avg dudy)~" << dudyatwall[].max << endl;
+
+Vh2 p2; p2 = p;
+Vh2 vmag = sqrt(ux^2 + uy^2);
+savevtk("ns_steady_result.vtk", Th, [ux, uy, 0], p2, vmag,
+        dataname="Velocity Pressure Vmag");
+cout << "saved to ns_steady_result.vtk" << endl;
+
+plot([ux, uy], wait=true, value=true, cmm="velocity vector");
+plot(vmag, wait=true, fill=true, value=true, cmm="velocity magnitude");

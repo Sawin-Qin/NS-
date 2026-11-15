@@ -1,0 +1,123 @@
+// ============================================================
+// 稳态不可压 Navier-Stokes
+// FreeFEM equivalent of dolfinx ns.py
+// Taylor-Hood P2/P1, Picard iteration
+// Gmsh msh: 1=inflow, 2=outflow, 3=bottom, 4=top, 100=domain
+// ============================================================
+
+// ---- 参数 ----
+real nu = 0.01;
+int maxiter = 50;
+real tol = 1e-8;
+
+// ---- 读网格 ----
+mesh Th = gmshload("rectangle_10x1.msh");
+cout << "  顶点数: " << Th.nv << endl;
+cout << "  单元数: " << Th.nt << endl;
+
+// ---- 空间 ----
+fespace Vh(Th, P2);   // 速度
+Vh u, v, uu, vv;      // u,v = trial/test; uu,vv = 分量
+
+fespace Qh(Th, P1);   // 压力
+Qh p, q, p_old;
+
+// 混合变量（用于后处理）
+fespace Wh(Th, [P2, P2, P1]);
+Wh [ux, uy, pp];
+
+// ---- 初始猜测 ----
+u = 0; v = 0; p = 0; p_old = 0;
+
+// ---- Picard 迭代 ----
+real l2 = 0;
+for (int k = 0; k < maxiter; k++) {
+    p_old = p;
+
+    // Oseen 线性化：用上一步速度做对流速度
+    // a(u,v) = (u·∇)u_n · v + nu ∇u:∇v - p ∇·v + ∇·u q
+    varf a([u, v, p], [uu, vv, q]) =
+        // 对流项: (u_old·∇)u · v
+        int2d(Th)(
+            (u * dx(uu) + v * dy(uu)) * uu
+          + (u * dx(vv) + v * dy(vv)) * vv
+        )
+        // 扩散项
+        + int2d(Th)(
+            nu * (dx(u)*dx(uu) + dy(u)*dy(uu)
+                + dx(v)*dx(vv) + dy(v)*dy(vv))
+        )
+        // 压力梯度项 (弱形式负号)
+        - int2d(Th)(
+            p * (dx(uu) + dy(vv))
+        )
+        // 质量守恒
+        + int2d(Th)(
+            (dx(u) + dy(v)) * q
+        )
+        // 稳定化: 压力项防止零能模式 (可选但推荐)
+        + int2d(Th)(
+            1e-10 * p * q
+        );
+
+    varf L([u, v, p], [uu, vv, q]) =
+        int2d(Th)(0);
+
+    // ---- 边界条件 ----
+    // 1=inflow: 抛物线 u=4y(1-y), v=0
+    // 3,4=wall: no-slip
+    // 2=outflow: p=0
+    matrix A = a(Vh, Qh, solver=sparsesolver, tgv=1e30);
+    real[int] rhs = L(0, 0, 0);
+
+    // Dirichlet BC
+    // 边界1: inflow
+    A = a(Vh, Qh, solver=sparsesolver, tgv=1e30);
+    rhs = L(0, 0, 0);
+
+    // 用 on() 施加 BC
+    varf bc([u, v, p], [uu, vv, q]) =
+          on(1, u=4*y*(1-y), v=0)
+        + on(3, u=0, v=0)
+        + on(4, u=0, v=0)
+        + on(2, p=0);
+
+    // ---- 求解 ----
+    set(A, solver=sparsesolver);
+    Wh [u1, v1, p1];
+    u1[] = A^-1 * rhs;
+
+    // 提取分量
+    u = u1; v = v1; p = p1;
+
+    // ---- 收敛判据 ----
+    real diff2 = int2d(Th)((u - p_old)^2);  // 近似判据
+    // 更精确的: 用所有变量
+    Wh [du, dv, dp];
+    du = u - p_old;  // p_old 近似
+
+    l2 = sqrt(int2d(Th)(du^2 + dv^2 + dp^2));
+    cout << "Picard " << k << ": |Δw| = " << l2 << endl;
+
+    if (l2 < tol) {
+        cout << "✓ 收敛于 " << k << " 步" << endl;
+        break;
+    }
+}
+
+// ---- 后处理 ----
+// 输出到 Paraview 格式
+{
+    ofstream ff("ns_steady_u.txt");
+    for (int i = 0; i < Th.nv; i++) {
+        ff << Th(i).x << " " << Th(i).y << " "
+           << u[][i] << " " << v[][i] << endl;
+    }
+}
+
+// 保存 VTK
+savemesh(Th, "ns_steady.vtk");
+
+cout << "✓ done" << endl;
+cout << "  速度场: ns_steady_u.txt" << endl;
+cout << "  网格: ns_steady.vtk" << endl;
